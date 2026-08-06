@@ -234,47 +234,66 @@ class CLIP_Model(nn.Module):
     def forward(self, image, labels=None, clip_loss=True, cls_loss=False):
         logits_per_image_clip, logits_per_text_clip, logits_per_image_cls = None, None, None
         logits_per_image_59_cls = None
-        # image [16, 3, 224, 224]
-        feature_s = self.extractor(image)  # ==>[bs, 512]
-        feature_list = self.encode_image(image)  # ==> 6*[bs, 512]
+
+        feature_s = self.extractor(image)
+        feature_list = self.encode_image(image)
         image_features = self.adapter(feature_s, feature_list, self.clip_model)
         image_features = image_features / image_features.norm(dim=1, keepdim=True)
         logit_scale = self.clip_model.logit_scale.exp()
 
-        prompts = self.prompt_learner()  # [2,77,512]  分别为a和b的prompts
-        tokenized_prompts = self.tokenized_prompts  # [2,77]tokenize
+        # 保留完整的 10 类 prompts
+        all_prompts = self.prompt_learner()
+        all_tokenized_prompts = self.tokenized_prompts
 
         bs = image.shape[0]
         class_image_list = []
         class_label_list = []
+
+        # 1) CLIP 对比损失：按当前 batch 的真实标签选 prompt
         if clip_loss and self.training:
-            # 根据标签排列
-            prompts_list = []  # ==>bs*[77,512]
+            prompts_list = []
             tokenized_prompts_list = []
+
             for index in range(bs):
-                prompts_list.append(prompts[labels[index]])
-                tokenized_prompts_list.append(tokenized_prompts[labels[index]])
-                # 根据label处理5/9类
-                if labels[index] == 5:
-                    class_image_list.append(image_features[index])
-                    class_label_list.append(0)  # 0
-                if labels[index] == 9:
-                    class_image_list.append(image_features[index])
-                    class_label_list.append(1)  # 1
+                lbl = labels[index].item()
 
-            prompts = torch.stack(prompts_list)
-            tokenized_prompts = torch.stack(tokenized_prompts_list)
-            text_features_clip = self.text_encoder(prompts, tokenized_prompts)
+                prompts_list.append(all_prompts[lbl])
+                tokenized_prompts_list.append(all_tokenized_prompts[lbl])
 
+                # 专门收集 5/9 类样本，用于辅助二分类
+                if lbl == 5:
+                    class_image_list.append(image_features[index])
+                    class_label_list.append(0)
+                elif lbl == 9:
+                    class_image_list.append(image_features[index])
+                    class_label_list.append(1)
+
+            batch_prompts = torch.stack(prompts_list)
+            batch_tokenized_prompts = torch.stack(tokenized_prompts_list)
+
+            text_features_clip = self.text_encoder(batch_prompts, batch_tokenized_prompts)
             text_features_clip = text_features_clip / text_features_clip.norm(dim=1, keepdim=True)
+
             logits_per_image_clip = logit_scale * image_features @ text_features_clip.t()
             logits_per_text_clip = logits_per_image_clip.t()
 
+        # 2) 主 10 类分类分支
         if cls_loss or (not self.training):
-            text_features_cls = self.text_encoder(prompts, tokenized_prompts)
+            text_features_cls = self.text_encoder(all_prompts, all_tokenized_prompts)
             text_features_cls = text_features_cls / text_features_cls.norm(dim=1, keepdim=True)
             logits_per_image_cls = logit_scale * image_features @ text_features_cls.t()
 
+        # 3) 5/9 辅助二分类分支
+        # 只有当前 batch 中存在类别 5 或 9 时才计算
+        if self.training and len(class_image_list) > 0:
+            class_image_features = torch.stack(class_image_list, dim=0)
+
+            prompts_59 = torch.stack([all_prompts[5], all_prompts[9]], dim=0)
+            tokenized_prompts_59 = torch.stack([all_tokenized_prompts[5], all_tokenized_prompts[9]], dim=0)
+
+            text_features_59 = self.text_encoder(prompts_59, tokenized_prompts_59)
+            text_features_59 = text_features_59 / text_features_59.norm(dim=1, keepdim=True)
+
+            logits_per_image_59_cls = logit_scale * class_image_features @ text_features_59.t()
+
         return logits_per_image_clip, logits_per_text_clip, logits_per_image_59_cls, class_label_list, logits_per_image_cls
-
-
