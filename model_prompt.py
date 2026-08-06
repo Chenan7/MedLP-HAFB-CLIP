@@ -7,7 +7,6 @@ import clip
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
 class TextEncoder(nn.Module):
     def __init__(self, clip_model):
         super().__init__()
