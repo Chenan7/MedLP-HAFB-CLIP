@@ -43,3 +43,4 @@ class CLIP_Model(nn.Module):
             logits_per_image_cls = logit_scale * image_features @ text_features_cls.t()
     
         return logits_per_image_clip, logits_per_text_clip, logits_per_image_cls
+        
