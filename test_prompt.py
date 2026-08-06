@@ -71,3 +71,4 @@ def validate(val_loader, model):
 
 if __name__ == '__main__':
     main()
+
